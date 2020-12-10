@@ -1,83 +1,95 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
-
-	//"log"
-	//"net/http"
-	//"os/signal"
 	"context"
 	"golang.org/x/sync/errgroup"
 )
 
-func serverAppWithTimeout(ctx context.Context) error {
+func serverAppWithTimeout(ctx context.Context, signalShotDown <-chan os.Signal) error {
 	mux := http.NewServeMux()
-	mux.Handle("/", func(resp http.ResponseWriter, req *http.Request) {
+	mux.HandleFunc("/", func(resp http.ResponseWriter, req *http.Request) {
 		fmt.Println(resp, "Start1: new courrency ServerApp —— Timeout 5seconds then quit")
 	})
 	s := &http.Server{
 		Addr:    "0.0.0.0:8080",
 		Handler: mux,
 	}
-	go func() {
+	go func() error {
 		timeout, cancel := context.WithTimeout(context.Background(), 5 * time.Second)
 		defer cancel()
 		select {
 			case <- ctx.Done():
 				fmt.Println("Timeout trick, Groutine Will Stop")
 				s.Shutdown(timeout)
+				return errors.New("App1 Stop, by Timeout")
+			case <- signalShotDown:
+				s.Shutdown(context.Background())
+				return errors.New("App1 Stop, by signal")
 		}
 	}()
 	fmt.Println("App1 starting")
 	return s.ListenAndServe()
 }
 
-func serverAppWithSigalQuit(ctx context.Context) error {
+func serverAppWithSigalQuit(ctx context.Context, signalShotDown <-chan os.Signal) error {
 	mux := http.NewServeMux()
-	mux.Handle("/", func(resp http.ResponseWriter, req *http.Request) {
+	mux.HandleFunc("/", func(resp http.ResponseWriter, req *http.Request) {
 		fmt.Println(resp, "Start2 .new courrency ServerAppWithSingleQuit —— Timeout 5seconds then quit")
 	})
 	s := &http.Server{
 		Addr:    "0.0.0.0:8080",
 		Handler: mux,
 	}
-	go func() {
+	go func() error {
 		timeout, cancel := context.WithTimeout(context.Background(), 5 * time.Second)
 		defer cancel()
 		select {
 			case <- ctx.Done():
 				fmt.Println("Timeout trick, Groutine Will Stop")
 				s.Shutdown(timeout)
-			case <- signalEvent:
-				return errors.New("Process Quit with Signal")
+				return errors.New("App2 Stop, by timeout")
+			case <- signalShotDown:
+				s.Shutdown(context.Background())
+				return errors.New("App2 Stop, by signal")
 		}
 	}()
 	fmt.Println("App2 Starting")
+	return s.ListenAndServe()
 }
 
+func signalShotDownEvent(signalShotdown chan os.Signal) error {
+	signal.Notify(signalShotdown,os.Interrupt,syscall.SIGINT,syscall.SIGHUP,syscall.SIGTERM,syscall.SIGQUIT,syscall.SIGKILL)
+	select {
+		case <- signalShotdown:
+			return errors.New("Receive ShotDown singal, Stop Server")
+	}
+}
 
 func main() {
+	signalShotDown := make(chan os.Signal)
 	group, ctx := errgroup.WithContext(context.Background())
 
 	group.Go(func() error {
-		return serverApp(ctx)
+		return serverAppWithTimeout(ctx, signalShotDown)
 	})
 
 	group.Go(func() error {
-		return serverDebug(ctx)
+		return serverAppWithSigalQuit(ctx, signalShotDown)
 	})
-	fmt.Println(group, ctx)
 
-	//http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-	//	fmt.Println(w, "hello, go cocurrence")
-	//})
-	//go func() {
-	//	if err:= http.ListenAndServe(":8080", nil); err != nil {
-	//		log.Fatal(err)
-	//	}
-	//}()
-	//
-	//select {}
+	group.Go(func() error {
+		return signalShotDownEvent(signalShotDown)
+	})
+
+	if err := group.Wait(); err != nil {
+		fmt.Println("Event: %+v", err)
+	}
+
 }
